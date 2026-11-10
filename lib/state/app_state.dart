@@ -127,7 +127,8 @@ class AppState extends ChangeNotifier {
   String _cameraSource = 'windshield'; // 'windshield' or 'live'
   int _vehicleSpeed = 35;
   String _gpsStatus = 'GPS OK';
-  bool _hazardDetected = true;
+  bool _hazardDetected = false;
+  PotholeVerificationResult? _lastVerificationResult;
   bool _soundAlertForPotholes = true;
   DateTime _lastBeepTime = DateTime.now();
 
@@ -139,6 +140,8 @@ class AppState extends ChangeNotifier {
   int get vehicleSpeed => _vehicleSpeed;
   String get gpsStatus => _gpsStatus;
   bool get hazardDetected => _hazardDetected;
+  PotholeVerificationResult? get lastVerificationResult =>
+      _lastVerificationResult ?? _currentRoadEvaluation?.verificationResult;
   bool get soundAlertForPotholes => _soundAlertForPotholes;
   DateTime get lastBeepTime => _lastBeepTime;
 
@@ -1422,10 +1425,15 @@ class AppState extends ChangeNotifier {
     try {
       final eval = await GeminiRoadService.instance.evaluateRoadImage(bytes);
       _currentRoadEvaluation = eval;
+      _lastVerificationResult = eval.verificationResult;
       _isEvaluatingWithGemini = false;
 
-      // Update hazard state based on Gemini verdict
-      if (!eval.isRoadAlright) {
+      // Strict gating: ONLY trigger hazard state when pothole is confirmed with confidence > 0.75
+      final bool isHazardVerified = eval.verificationResult != null
+          ? eval.verificationResult!.isVerifiedHazard
+          : (!eval.isRoadAlright);
+
+      if (isHazardVerified && !eval.isRoadAlright) {
         _hazardDetected = true;
         if (_soundAlertForPotholes) {
           audioBeep();
@@ -1439,6 +1447,7 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       _isEvaluatingWithGemini = false;
       _lastGeminiEvaluationError = e.toString();
+      _hazardDetected = false; // Fail-safe: errors never trigger a false positive
       notifyListeners();
       return null;
     }
@@ -1447,9 +1456,23 @@ class AppState extends ChangeNotifier {
   /// Sets road evaluation manually (e.g. for testing or resets)
   void setRoadEvaluation(RoadConditionEvaluation? eval) {
     _currentRoadEvaluation = eval;
+    _lastVerificationResult = eval?.verificationResult;
     if (eval != null) {
-      _hazardDetected = !eval.isRoadAlright;
+      final bool isHazard = eval.verificationResult != null
+          ? eval.verificationResult!.isVerifiedHazard
+          : !eval.isRoadAlright;
+      _hazardDetected = isHazard;
+    } else {
+      _hazardDetected = false;
     }
+    notifyListeners();
+  }
+
+  /// Resets hazard and evaluation state to safe defaults
+  void resetHazardState() {
+    _hazardDetected = false;
+    _currentRoadEvaluation = null;
+    _lastVerificationResult = null;
     notifyListeners();
   }
 

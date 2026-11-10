@@ -267,7 +267,7 @@ Respond strictly in valid JSON matching this schema:
 }
 ''';
 
-    final url =
+    const url =
         '${GeminiConfig.apiBase}/models/${GeminiConfig.visionModel}:generateContent?key=${GeminiConfig.apiKey}';
 
     final requestBody = jsonEncode({
@@ -505,7 +505,7 @@ Respond ONLY with a valid JSON object matching this schema:
   /// Lightweight connectivity test for Gemini API Key
   Future<Map<String, dynamic>> testConnection() async {
     final stopwatch = Stopwatch()..start();
-    final url =
+    const url =
         '${GeminiConfig.apiBase}/models/${GeminiConfig.visionModel}:generateContent?key=${GeminiConfig.apiKey}';
 
     final body = jsonEncode({

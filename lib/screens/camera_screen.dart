@@ -595,7 +595,11 @@ class _CameraScreenState extends State<CameraScreen>
       ),
       child: Column(
         children: [
-          Row(
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 6,
             children: [
               // 1. Camera Feed Toggle Switch
               Row(
@@ -632,7 +636,6 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                 ],
               ),
-              const Spacer(),
 
               // 2. AI Detection Toggle Switch
               Row(
@@ -1095,32 +1098,32 @@ class _CameraScreenState extends State<CameraScreen>
             ),
           ),
 
-          // Overlay Center Top: Hazard Detection status indicator
+          // Overlay Status indicator positioned cleanly below the top-left badge without overlapping
           Positioned(
-            top: 13,
-            left: 0,
-            right: 0,
-            child: Center(
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.4),
-                  borderRadius: BorderRadius.circular(12),
+            top: 40,
+            left: 10,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  width: 0.8,
                 ),
-                child: Text(
-                  appState.isAiDetectionEnabled
-                      ? 'Hazard Detection - Active'
-                      : 'AI Detection Paused',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.9),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.4,
-                    shadows: const [
-                      Shadow(color: Colors.black54, blurRadius: 4),
-                    ],
-                  ),
+              ),
+              child: Text(
+                appState.isAiDetectionEnabled
+                    ? 'Hazard Detection - Active'
+                    : 'AI Detection Paused',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.9),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 0.3,
+                  shadows: const [
+                    Shadow(color: Colors.black54, blurRadius: 4),
+                  ],
                 ),
               ),
             ),
@@ -1164,14 +1167,18 @@ class _CameraScreenState extends State<CameraScreen>
               },
             ),
 
-          // AI Hazard Detection Overlays (when AI Detection is enabled)
+          // AI Hazard / Surface Detection Overlays (when AI Detection is enabled)
           if (appState.isAiDetectionEnabled)
             Positioned(
-              top: 100,
-              left: 60,
-              right: 60,
-              height: 125,
-              child: _buildHazardOverlay(context, appState),
+              top: 85,
+              left: 40,
+              right: 40,
+              height: 140,
+              child: appState.isEvaluatingWithGemini
+                  ? _buildEvaluatingOverlay(context, appState)
+                  : (appState.hazardDetected
+                      ? _buildHazardOverlay(context, appState)
+                      : _buildClearSurfaceOverlay(context, appState)),
             ),
 
           // Floating Shutter / Resume Button (Center Bottom of Viewfinder)
@@ -1288,8 +1295,237 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  // ─── Clean Surface Reticle (No Pothole Detected) ─────────────────────────
+  Widget _buildClearSurfaceOverlay(BuildContext context, AppState appState) {
+    final verification = appState.lastVerificationResult;
+    final String reasonText = verification != null && verification.reason.isNotEmpty
+        ? verification.reason
+        : 'Pavement is intact with no structural cavities.';
+    final String confidenceText = verification != null && verification.confidence > 0
+        ? ' (${verification.confidencePercent}% Conf)'
+        : '';
+
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF10B981).withValues(alpha: 0.12),
+        border: Border.all(
+          color: const Color(0xFF10B981).withValues(alpha: 0.65),
+          width: 1.8,
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header Banner: [check] Road Surface Clear | Safe
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+            decoration: const BoxDecoration(
+              color: Color(0xFF047857),
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(6),
+                topRight: Radius.circular(6),
+              ),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.check_circle_rounded,
+                      color: Colors.white,
+                      size: 14,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Road Surface Clear$confidenceText',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'Safe',
+                    style: TextStyle(
+                      color: Color(0xFF047857),
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Inner Focus Reticle with "NO POTHOLE DETECTED"
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              child: CustomPaint(
+                painter: const ReticleCornerPainter(
+                  color: Color(0xFF10B981),
+                  strokeWidth: 2.0,
+                  cornerLength: 10.0,
+                ),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 2.5),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF10B981),
+                          borderRadius: BorderRadius.circular(3),
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF10B981)
+                                  .withValues(alpha: 0.4),
+                              blurRadius: 4,
+                            ),
+                          ],
+                        ),
+                        child: const Text(
+                          'NO POTHOLE DETECTED',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        reasonText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.85),
+                          fontSize: 9.0,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Gemini 2.5 Flash Evaluating Overlay ─────────────────────────────────
+  Widget _buildEvaluatingOverlay(BuildContext context, AppState appState) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0284C7).withValues(alpha: 0.15),
+        border: Border.all(
+          color: const Color(0xFF38BDF8).withValues(alpha: 0.7),
+          width: 1.8,
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          DecoratedBox(
+            decoration: BoxDecoration(
+              color: Color(0xFF0284C7),
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(6),
+                topRight: Radius.circular(6),
+              ),
+            ),
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.auto_awesome_rounded,
+                        color: Colors.white,
+                        size: 14,
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        'Gemini 2.5 Flash Vision Inspection',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    'Verifying...',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 9.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          Expanded(
+            child: Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(Color(0xFF38BDF8)),
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'ANALYZING SURFACE CAVITIES...',
+                    style: TextStyle(
+                      color: Color(0xFF38BDF8),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ─── AI Hazard Bounding Box & Cyan Reticle ──────────────────────────────────
   Widget _buildHazardOverlay(BuildContext context, AppState appState) {
+    final verification = appState.lastVerificationResult;
+    final String hazardTitle = verification != null
+        ? 'Pothole Detected (${verification.confidencePercent}% Conf)'
+        : 'Pothole Detected (High)';
     return GestureDetector(
       onTap: () => _showDefectSnapshotModal(context, appState),
       child: AnimatedBuilder(
@@ -1328,17 +1564,17 @@ class _CameraScreenState extends State<CameraScreen>
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          const Row(
+                          Row(
                             children: [
-                              Icon(
+                              const Icon(
                                 Icons.warning_amber_rounded,
                                 color: Colors.white,
                                 size: 14,
                               ),
-                              SizedBox(width: 4),
+                              const SizedBox(width: 4),
                               Text(
-                                'Pothole Detected (High)',
-                                style: TextStyle(
+                                hazardTitle,
+                                style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 10.5,
                                   fontWeight: FontWeight.w700,

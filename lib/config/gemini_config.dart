@@ -7,6 +7,9 @@ class GeminiConfig {
     defaultValue: 'YOUR_GEMINI_API_KEY',
   );
 
+  /// Targeted Multimodal Vision Model for Road Surface Verification
+  static const String visionModel = 'gemini-2.5-flash';
+
   /// Primary Multimodal Model (Gemini 3.5 Flash Lite for fast road condition assessment)
   static const String primaryModel = 'gemini-3.5-flash-lite';
 
@@ -15,6 +18,10 @@ class GeminiConfig {
 
   /// Gemini REST API Base URL
   static const String apiBase = 'https://generativelanguage.googleapis.com/v1beta';
+
+  /// Endpoint URL for generateContent with vision model (Gemini 2.5 Flash)
+  static String get visionGenerateContentUrl =>
+      '$apiBase/models/$visionModel:generateContent?key=$apiKey';
 
   /// Endpoint URL for generateContent with primary model
   static String get generateContentUrl =>

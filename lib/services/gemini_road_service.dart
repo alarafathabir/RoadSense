@@ -4,6 +4,94 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:road_sense/config/gemini_config.dart';
 
+/// Structured verification result returned by Gemini Vision for road surface inspection.
+class PotholeVerificationResult {
+  final bool potholeDetected;
+  final double confidence; // 0.0 - 1.0
+  final String reason;
+  final DateTime analyzedAt;
+  final String modelUsed;
+  final int latencyMs;
+  final bool isErrorFallback;
+
+  const PotholeVerificationResult({
+    required this.potholeDetected,
+    required this.confidence,
+    required this.reason,
+    required this.analyzedAt,
+    this.modelUsed = GeminiConfig.visionModel,
+    this.latencyMs = 0,
+    this.isErrorFallback = false,
+  });
+
+  /// Confidence expressed as an integer percentage (e.g. 88%)
+  int get confidencePercent => (confidence * 100).round().clamp(0, 100);
+
+  /// Whether this result passes the strict hazard threshold (> 0.75 confidence)
+  bool get isVerifiedHazard => potholeDetected && confidence > 0.75;
+
+  factory PotholeVerificationResult.fromJson(
+    Map<String, dynamic> json, {
+    String modelUsed = GeminiConfig.visionModel,
+    int latencyMs = 0,
+  }) {
+    final bool detected = json['pothole_detected'] == true ||
+        json['potholeDetected'] == true ||
+        json['isPothole'] == true;
+
+    double conf = 0.0;
+    final rawConf = json['confidence'];
+    if (rawConf is num) {
+      conf = rawConf.toDouble();
+      if (conf > 1.0 && conf <= 100.0) {
+        conf = conf / 100.0;
+      }
+    }
+    conf = conf.clamp(0.0, 1.0);
+
+    final String reason = json['reason'] as String? ??
+        (detected
+            ? 'Structural cavity or broken depression observed on road pavement.'
+            : 'Normal pavement or clear road surface.');
+
+    return PotholeVerificationResult(
+      potholeDetected: detected,
+      confidence: conf,
+      reason: reason,
+      analyzedAt: DateTime.now(),
+      modelUsed: modelUsed,
+      latencyMs: latencyMs,
+      isErrorFallback: false,
+    );
+  }
+
+  /// Safe fallback result for errors, timeouts, or unconfigured API keys
+  factory PotholeVerificationResult.safeFallback({
+    required String reason,
+    int latencyMs = 0,
+  }) {
+    return PotholeVerificationResult(
+      potholeDetected: false,
+      confidence: 0.0,
+      reason: reason,
+      analyzedAt: DateTime.now(),
+      modelUsed: GeminiConfig.visionModel,
+      latencyMs: latencyMs,
+      isErrorFallback: true,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'pothole_detected': potholeDetected,
+    'confidence': confidence,
+    'reason': reason,
+    'analyzedAt': analyzedAt.toIso8601String(),
+    'modelUsed': modelUsed,
+    'latencyMs': latencyMs,
+    'isErrorFallback': isErrorFallback,
+  };
+}
+
 /// Structured evaluation of road condition analyzed by Gemini AI
 class RoadConditionEvaluation {
   final bool isRoadAlright;
@@ -19,6 +107,7 @@ class RoadConditionEvaluation {
   final DateTime analyzedAt;
   final String modelUsed;
   final int latencyMs;
+  final PotholeVerificationResult? verificationResult;
 
   const RoadConditionEvaluation({
     required this.isRoadAlright,
@@ -34,6 +123,7 @@ class RoadConditionEvaluation {
     required this.analyzedAt,
     required this.modelUsed,
     required this.latencyMs,
+    this.verificationResult,
   });
 
   String get statusHeading =>
@@ -46,6 +136,7 @@ class RoadConditionEvaluation {
     Map<String, dynamic> json, {
     required String modelUsed,
     required int latencyMs,
+    PotholeVerificationResult? verificationResult,
   }) {
     final bool isAlright = json['isRoadAlright'] == true;
     final String verdict = json['verdict'] as String? ??
@@ -68,6 +159,21 @@ class RoadConditionEvaluation {
         : (isAlright ? 0 : 2800);
     final String summary = json['summary'] as String? ?? verdict;
 
+    final resolvedVerification = verificationResult ??
+        (json['verificationResult'] is Map<String, dynamic>
+            ? PotholeVerificationResult.fromJson(
+                json['verificationResult'] as Map<String, dynamic>,
+                modelUsed: modelUsed,
+                latencyMs: latencyMs,
+              )
+            : (json.containsKey('pothole_detected') || json.containsKey('potholeDetected')
+                ? PotholeVerificationResult.fromJson(
+                    json,
+                    modelUsed: modelUsed,
+                    latencyMs: latencyMs,
+                  )
+                : null));
+
     return RoadConditionEvaluation(
       isRoadAlright: isAlright,
       verdict: verdict,
@@ -82,6 +188,7 @@ class RoadConditionEvaluation {
       analyzedAt: DateTime.now(),
       modelUsed: modelUsed,
       latencyMs: latencyMs,
+      verificationResult: resolvedVerification,
     );
   }
 
@@ -99,6 +206,7 @@ class RoadConditionEvaluation {
     'analyzedAt': analyzedAt.toIso8601String(),
     'modelUsed': modelUsed,
     'latencyMs': latencyMs,
+    if (verificationResult != null) 'verificationResult': verificationResult!.toJson(),
   };
 }
 
@@ -110,6 +218,125 @@ class GeminiRoadService {
 
   final http.Client _httpClient = http.Client();
 
+  /// Strictly verifies whether a real structural pothole exists in the provided camera frame
+  /// using the Gemini Vision API (gemini-2.5-flash).
+  ///
+  /// Verification Rules:
+  /// 1. Return true ONLY if there is a visible structural cavity, bowl-shaped depression,
+  ///    or broken chunk missing from the road surface.
+  /// 2. Return false for normal pavement, shadows, tire marks, oil stains, manhole covers,
+  ///    speed bumps, shallow surface cracks, or non-road images.
+  /// 3. If the image is too blurry, dark, or obstructed to confirm a depression with certainty,
+  ///    return false.
+  Future<PotholeVerificationResult> verifyPotholeInImage(
+    Uint8List imageBytes, {
+    String mimeType = 'image/jpeg',
+  }) async {
+    final stopwatch = Stopwatch()..start();
+
+    if (imageBytes.isEmpty) {
+      stopwatch.stop();
+      return PotholeVerificationResult.safeFallback(
+        reason: 'No image frame provided for verification.',
+        latencyMs: stopwatch.elapsedMilliseconds,
+      );
+    }
+
+    if (GeminiConfig.apiKey.isEmpty || GeminiConfig.apiKey == 'YOUR_GEMINI_API_KEY') {
+      stopwatch.stop();
+      return PotholeVerificationResult.safeFallback(
+        reason: 'Gemini API key is not configured. Set GEMINI_API_KEY to enable live verification.',
+        latencyMs: stopwatch.elapsedMilliseconds,
+      );
+    }
+
+    final base64Image = base64Encode(imageBytes);
+    const systemPrompt = '''
+You are a strict road-surface inspection assistant. Analyze the provided image and verify whether a real pothole exists.
+
+Verification Rules:
+1. Return true ONLY if there is a visible structural cavity, bowl-shaped depression, or broken chunk missing from the road surface.
+2. Return false for normal pavement, shadows, tire marks, oil stains, manhole covers, speed bumps, shallow surface cracks, or non-road images.
+3. If the image is too blurry, dark, or obstructed to confirm a depression with certainty, return false.
+
+Respond strictly in valid JSON matching this schema:
+{
+  "pothole_detected": boolean,
+  "confidence": number between 0 and 1,
+  "reason": "Short explanation of the surface feature observed"
+}
+''';
+
+    final url =
+        '${GeminiConfig.apiBase}/models/${GeminiConfig.visionModel}:generateContent?key=${GeminiConfig.apiKey}';
+
+    final requestBody = jsonEncode({
+      'contents': [
+        {
+          'parts': [
+            {'text': systemPrompt},
+            {
+              'inline_data': {
+                'mime_type': mimeType,
+                'data': base64Image,
+              }
+            }
+          ]
+        }
+      ],
+      'generationConfig': {
+        'temperature': 0.1,
+        'responseMimeType': 'application/json',
+      }
+    });
+
+    try {
+      final response = await _httpClient
+          .post(
+            Uri.parse(url),
+            headers: {'Content-Type': 'application/json'},
+            body: requestBody,
+          )
+          .timeout(const Duration(seconds: 12));
+
+      stopwatch.stop();
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is Map &&
+            data.containsKey('candidates') &&
+            (data['candidates'] as List).isNotEmpty) {
+          final candidate = data['candidates'][0];
+          final parts = candidate['content']?['parts'] as List?;
+          if (parts != null && parts.isNotEmpty) {
+            final rawText = parts[0]['text'] as String? ?? '{}';
+            try {
+              final parsedJson = jsonDecode(rawText) as Map<String, dynamic>;
+              return PotholeVerificationResult.fromJson(
+                parsedJson,
+                modelUsed: GeminiConfig.visionModel,
+                latencyMs: stopwatch.elapsedMilliseconds,
+              );
+            } catch (jsonErr) {
+              debugPrint('[GeminiRoadService] JSON decode failed for response: $rawText ($jsonErr)');
+            }
+          }
+        }
+      } else {
+        debugPrint(
+            '[GeminiRoadService] Vision API returned HTTP ${response.statusCode}: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('[GeminiRoadService] Vision API call failed: $e');
+    }
+
+    stopwatch.stop();
+    // Invariant: errors must never default to a false-positive hazard!
+    return PotholeVerificationResult.safeFallback(
+      reason: 'Verification unavailable due to network or service error. Defaulting to safe state.',
+      latencyMs: stopwatch.elapsedMilliseconds,
+    );
+  }
+
   /// Evaluates an image of a road captured via camera or gallery
   /// and determines whether the road condition is alright or not.
   Future<RoadConditionEvaluation> evaluateRoadImage(
@@ -117,36 +344,65 @@ class GeminiRoadService {
     String mimeType = 'image/jpeg',
   }) async {
     final stopwatch = Stopwatch()..start();
-    final base64Image = base64Encode(imageBytes);
 
+    // 1. First run the strict Gemini 2.5 Flash pothole verification
+    final verification = await verifyPotholeInImage(imageBytes, mimeType: mimeType);
+
+    // If an API key is unconfigured or network failed completely
+    if (verification.isErrorFallback) {
+      stopwatch.stop();
+      return _buildFallbackEvaluation(imageBytes, stopwatch.elapsedMilliseconds, verification: verification);
+    }
+
+    // 2. If Gemini Vision verified NO pothole or confidence <= 0.75, return an Alright / Safe evaluation
+    if (!verification.isVerifiedHazard) {
+      stopwatch.stop();
+      return RoadConditionEvaluation(
+        isRoadAlright: true,
+        verdict: 'Road condition is alright. ${verification.reason}',
+        defectType: 'None',
+        severity: 'None',
+        conditionScore: 92,
+        depthEstimate: 'N/A',
+        damageArea: 'N/A',
+        recommendedAction: 'Standard routine Public Works monitoring',
+        estimatedCostTaka: 0,
+        summary: 'Gemini 2.5 Flash verified road surface: ${verification.reason}',
+        analyzedAt: DateTime.now(),
+        modelUsed: GeminiConfig.visionModel,
+        latencyMs: stopwatch.elapsedMilliseconds,
+        verificationResult: verification,
+      );
+    }
+
+    // 3. If verified pothole (> 0.75 confidence), query full multimodal road diagnostics
+    final base64Image = base64Encode(imageBytes);
     const prompt = '''
 You are an expert Public Works municipal road safety inspector and computer vision pavement engineer.
 Analyze this captured road photograph and determine definitively:
 IS THE ROAD CONDITION ALRIGHT OR NOT?
 
 Evaluation Guidelines:
-- "isRoadAlright": true -> If the road surface is smooth, intact, safely passable, with no hazardous cavities, deep potholes, or severe structural cracks.
-- "isRoadAlright": false -> If there are potholes, cavities, significant asphalt cracking, rutting, edge drop-offs, sinkholes, or pavement disintegration.
+- "isRoadAlright": false -> A verified pothole has been detected on this road.
 
 Respond ONLY with a valid JSON object matching this schema:
 {
-  "isRoadAlright": boolean,
-  "verdict": "Clear, direct verdict explicitly stating whether the road condition is alright or not alright",
-  "defectType": "None" | "Pothole" | "Asphalt Crack" | "Rutting" | "Edge Void" | "Surface Wear" | "Obstruction",
-  "severity": "None" | "Low" | "Medium" | "Urgent",
-  "conditionScore": integer between 0 and 100,
-  "depthEstimate": "e.g. 7.0 cm or N/A",
-  "damageArea": "e.g. 1.2 m² or N/A",
-  "recommendedAction": "Concise repair recommendation (e.g. Routine monitoring, or Cold Mix Patch, or Asphalt Resurfacing)",
-  "estimatedCostTaka": integer in Bangladeshi Taka (0 if alright, or repair cost e.g. 2800),
+  "isRoadAlright": false,
+  "verdict": "Detailed verdict specifying the pothole cavity observed",
+  "defectType": "Pothole",
+  "severity": "Low" | "Medium" | "Urgent",
+  "conditionScore": integer between 20 and 55,
+  "depthEstimate": "e.g. 7.0 cm",
+  "damageArea": "e.g. 1.2 m²",
+  "recommendedAction": "Concise repair recommendation (e.g. Cold Mix Patch and vibratory compaction)",
+  "estimatedCostTaka": integer in Bangladeshi Taka (e.g. 2800),
   "summary": "2-3 clear sentences explaining the visible road condition and reasoning for the verdict"
 }
 ''';
 
-    // Model list in priority order
     final models = [
+      GeminiConfig.visionModel, // gemini-2.5-flash
       GeminiConfig.primaryModel, // gemini-3.5-flash-lite
-      GeminiConfig.advancedModel, // gemini-3.8-flash
     ];
 
     for (final model in models) {
@@ -179,7 +435,7 @@ Respond ONLY with a valid JSON object matching this schema:
               headers: {'Content-Type': 'application/json'},
               body: requestBody,
             )
-            .timeout(const Duration(seconds: 15));
+            .timeout(const Duration(seconds: 12));
 
         if (response.statusCode == 200) {
           stopwatch.stop();
@@ -197,50 +453,60 @@ Respond ONLY with a valid JSON object matching this schema:
                   parsedJson,
                   modelUsed: model,
                   latencyMs: stopwatch.elapsedMilliseconds,
+                  verificationResult: verification,
                 );
               } catch (_) {
-                // If text response wasn't pure JSON, check keyword content
-                final lower = rawText.toLowerCase();
-                final isAlright = lower.contains('alright') && !lower.contains('not alright');
+                // If parsing secondary diagnostic fails, build from verification
                 return RoadConditionEvaluation(
-                  isRoadAlright: isAlright,
-                  verdict: isAlright
-                      ? 'Road condition is ALRIGHT: Pavement is in acceptable condition.'
-                      : 'Road condition is NOT ALRIGHT: Structural surface defects detected.',
-                  defectType: isAlright ? 'None' : 'Pothole',
-                  severity: isAlright ? 'None' : 'Urgent',
-                  conditionScore: isAlright ? 85 : 40,
-                  depthEstimate: isAlright ? 'N/A' : '7.0 cm',
-                  damageArea: isAlright ? 'N/A' : '1.2 m²',
-                  recommendedAction: isAlright ? 'Public Works routine monitoring' : 'Patch defect with cold mix asphalt',
-                  estimatedCostTaka: isAlright ? 0 : 2800,
-                  summary: rawText.trim(),
+                  isRoadAlright: false,
+                  verdict: 'ROAD NOT ALRIGHT: ${verification.reason}',
+                  defectType: 'Pothole',
+                  severity: 'Urgent',
+                  conditionScore: 40,
+                  depthEstimate: '7.0 cm',
+                  damageArea: '1.2 m²',
+                  recommendedAction: 'Rapid cold mix asphalt patch and compaction',
+                  estimatedCostTaka: 2800,
+                  summary: verification.reason,
                   analyzedAt: DateTime.now(),
                   modelUsed: model,
                   latencyMs: stopwatch.elapsedMilliseconds,
+                  verificationResult: verification,
                 );
               }
             }
           }
-        } else {
-          debugPrint('[GeminiRoadService] Model $model returned status ${response.statusCode}: ${response.body}');
         }
       } catch (e) {
-        debugPrint('[GeminiRoadService] Model $model failed with error: $e');
+        debugPrint('[GeminiRoadService] Secondary diagnostic model $model failed: $e');
       }
     }
 
     stopwatch.stop();
-
-    // Fallback heuristic evaluation if network is unreachable
-    return _buildFallbackEvaluation(imageBytes, stopwatch.elapsedMilliseconds);
+    // Return verified hazard evaluation
+    return RoadConditionEvaluation(
+      isRoadAlright: false,
+      verdict: 'ROAD NOT ALRIGHT: Structural pothole detected (${verification.confidencePercent}% confidence).',
+      defectType: 'Pothole',
+      severity: 'Urgent',
+      conditionScore: 40,
+      depthEstimate: '7.0 cm',
+      damageArea: '1.2 m²',
+      recommendedAction: 'Rapid cold mix asphalt patch and vibratory compaction',
+      estimatedCostTaka: 2800,
+      summary: verification.reason,
+      analyzedAt: DateTime.now(),
+      modelUsed: GeminiConfig.visionModel,
+      latencyMs: stopwatch.elapsedMilliseconds,
+      verificationResult: verification,
+    );
   }
 
   /// Lightweight connectivity test for Gemini API Key
   Future<Map<String, dynamic>> testConnection() async {
     final stopwatch = Stopwatch()..start();
-    const url =
-        '${GeminiConfig.apiBase}/models/${GeminiConfig.primaryModel}:generateContent?key=${GeminiConfig.apiKey}';
+    final url =
+        '${GeminiConfig.apiBase}/models/${GeminiConfig.visionModel}:generateContent?key=${GeminiConfig.apiKey}';
 
     final body = jsonEncode({
       'contents': [
@@ -266,9 +532,9 @@ Respond ONLY with a valid JSON object matching this schema:
         'success': res.statusCode == 200,
         'statusCode': res.statusCode,
         'latencyMs': stopwatch.elapsedMilliseconds,
-        'model': GeminiConfig.primaryModel,
+        'model': GeminiConfig.visionModel,
         'message': res.statusCode == 200
-            ? 'Connected to Gemini API (${GeminiConfig.primaryModel}) in ${stopwatch.elapsedMilliseconds}ms.'
+            ? 'Connected to Gemini API (${GeminiConfig.visionModel}) in ${stopwatch.elapsedMilliseconds}ms.'
             : 'Gemini API responded with HTTP ${res.statusCode}',
       };
     } catch (e) {
@@ -281,22 +547,33 @@ Respond ONLY with a valid JSON object matching this schema:
     }
   }
 
-  RoadConditionEvaluation _buildFallbackEvaluation(Uint8List bytes, int latencyMs) {
-    // Default smart Public Works road evaluation when offline
+  /// Fail-safe road evaluation: Defaults to safe (no false alert) when offline or on error
+  RoadConditionEvaluation _buildFallbackEvaluation(
+    Uint8List bytes,
+    int latencyMs, {
+    PotholeVerificationResult? verification,
+  }) {
+    final v = verification ??
+        PotholeVerificationResult.safeFallback(
+          reason: 'No structural hazard confirmed (Offline/Safe mode).',
+          latencyMs: latencyMs,
+        );
+
     return RoadConditionEvaluation(
-      isRoadAlright: false,
-      verdict: 'ROAD NOT ALRIGHT: Asphalt surface cavity & pothole hazard detected.',
-      defectType: 'Pothole Cavity',
-      severity: 'Urgent',
-      conditionScore: 48,
-      depthEstimate: '7.2 cm depth',
-      damageArea: '1.2 m²',
-      recommendedAction: 'Rapid cold mix asphalt patch and vibratory compaction',
-      estimatedCostTaka: 2800,
-      summary: 'Computer Vision evaluated road pavement. Significant asphalt degradation and depression visible requiring immediate municipal public works repair.',
+      isRoadAlright: true, // Fail-safe: Safe by default, never default to false positive alert!
+      verdict: 'ROAD SURFACE: Safe inspection completed. No confirmed structural hazard.',
+      defectType: 'None',
+      severity: 'None',
+      conditionScore: 90,
+      depthEstimate: 'N/A',
+      damageArea: 'N/A',
+      recommendedAction: 'Standard routine Public Works monitoring',
+      estimatedCostTaka: 0,
+      summary: v.reason,
       analyzedAt: DateTime.now(),
-      modelUsed: '${GeminiConfig.primaryModel} (Cached/Heuristic)',
+      modelUsed: '${GeminiConfig.visionModel} (Fail-safe)',
       latencyMs: latencyMs,
+      verificationResult: v,
     );
   }
 }

@@ -14,6 +14,7 @@ const String kOsmApiBase = 'https://api.openstreetmap.org/api/0.6';
 /// Gemini API Configuration
 final String kGeminiApiKey =
     Platform.environment['GEMINI_API_KEY'] ?? 'YOUR_GEMINI_API_KEY';
+const String kGeminiVisionModel = 'gemini-2.5-flash';
 const String kGeminiModel = 'gemini-3.5-flash-lite';
 
 void main() async {
@@ -133,6 +134,107 @@ Future<void> _handleRequest(HttpRequest request, Directory uploadsDir) async {
         response.statusCode = HttpStatus.internalServerError;
         response.headers.contentType = ContentType.json;
         response.write(jsonEncode({'error': e.toString()}));
+      } finally {
+        client.close();
+      }
+      await response.close();
+      return;
+    }
+
+    // 1.3 Gemini Strict Pothole Verification (gemini-2.5-flash)
+    if (path == '/api/gemini/verify' && method == 'POST') {
+      final content = await utf8.decoder.bind(request).join();
+      final data = jsonDecode(content);
+      final base64Image = (data['base64'] ?? data['imageBase64'] ?? '') as String;
+
+      if (kGeminiApiKey.isEmpty || kGeminiApiKey == 'YOUR_GEMINI_API_KEY') {
+        response.headers.contentType = ContentType.json;
+        response.write(jsonEncode({
+          'pothole_detected': false,
+          'confidence': 0.0,
+          'reason': 'Gemini API key is not configured on backend server.',
+        }));
+        await response.close();
+        return;
+      }
+
+      final client = HttpClient();
+      try {
+        final geminiUri = Uri.parse(
+          'https://generativelanguage.googleapis.com/v1beta/models/$kGeminiVisionModel:generateContent?key=$kGeminiApiKey',
+        );
+        final req = await client.postUrl(geminiUri);
+        req.headers.contentType = ContentType.json;
+
+        const systemPrompt = '''
+You are a strict road-surface inspection assistant. Analyze the provided image and verify whether a real pothole exists.
+
+Verification Rules:
+1. Return true ONLY if there is a visible structural cavity, bowl-shaped depression, or broken chunk missing from the road surface.
+2. Return false for normal pavement, shadows, tire marks, oil stains, manhole covers, speed bumps, shallow surface cracks, or non-road images.
+3. If the image is too blurry, dark, or obstructed to confirm a depression with certainty, return false.
+
+Respond strictly in valid JSON matching this schema:
+{
+  "pothole_detected": boolean,
+  "confidence": number between 0 and 1,
+  "reason": "Short explanation of the surface feature observed"
+}
+''';
+
+        final geminiBody = jsonEncode({
+          'contents': [
+            {
+              'parts': [
+                {'text': systemPrompt},
+                {
+                  'inline_data': {
+                    'mime_type': 'image/jpeg',
+                    'data': base64Image,
+                  }
+                }
+              ]
+            }
+          ],
+          'generationConfig': {
+            'temperature': 0.1,
+            'responseMimeType': 'application/json',
+          }
+        });
+
+        req.write(geminiBody);
+        final geminiRes = await req.close();
+        final resBody = await utf8.decoder.bind(geminiRes).join();
+
+        response.headers.contentType = ContentType.json;
+        if (geminiRes.statusCode == 200) {
+          final resData = jsonDecode(resBody);
+          final candidates = resData['candidates'] as List?;
+          if (candidates != null && candidates.isNotEmpty) {
+            final text = candidates[0]['content']?['parts']?[0]?['text'] ?? '{}';
+            response.write(text);
+          } else {
+            response.write(jsonEncode({
+              'pothole_detected': false,
+              'confidence': 0.0,
+              'reason': 'No candidate returned by Gemini Vision.',
+            }));
+          }
+        } else {
+          response.statusCode = geminiRes.statusCode;
+          response.write(jsonEncode({
+            'pothole_detected': false,
+            'confidence': 0.0,
+            'reason': 'Gemini Vision returned status ${geminiRes.statusCode}',
+          }));
+        }
+      } catch (e) {
+        response.headers.contentType = ContentType.json;
+        response.write(jsonEncode({
+          'pothole_detected': false,
+          'confidence': 0.0,
+          'reason': 'Server verification error: $e',
+        }));
       } finally {
         client.close();
       }

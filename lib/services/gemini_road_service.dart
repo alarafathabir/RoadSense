@@ -14,15 +14,15 @@ class PotholeVerificationResult {
   final int latencyMs;
   final bool isErrorFallback;
 
-  const PotholeVerificationResult({
+  PotholeVerificationResult({
     required this.potholeDetected,
     required this.confidence,
     required this.reason,
-    required this.analyzedAt,
+    DateTime? analyzedAt,
     this.modelUsed = GeminiConfig.visionModel,
     this.latencyMs = 0,
     this.isErrorFallback = false,
-  });
+  }) : analyzedAt = analyzedAt ?? DateTime.now();
 
   /// Confidence expressed as an integer percentage (e.g. 88%)
   int get confidencePercent => (confidence * 100).round().clamp(0, 100);

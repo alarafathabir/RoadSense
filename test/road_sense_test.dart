@@ -57,6 +57,9 @@ void main() {
 
     testWidgets('2. Camera Screen renders AI HUD and interactive controls',
         (WidgetTester tester) async {
+      final state = AppState.instance;
+      state.resetHazardState();
+
       await tester.pumpWidget(
         MaterialApp(
           theme: AppTheme.lightTheme,
@@ -69,13 +72,19 @@ void main() {
       expect(find.text('Live Road Camera'), findsOneWidget);
       expect(find.text('Active'), findsOneWidget);
 
-      // Camera HUD overlays
+      // Camera HUD overlays: Defaults safely to NO POTHOLE DETECTED
       expect(find.text('AI Scanning Road'), findsOneWidget);
       expect(find.text('Hazard Detection - Active'), findsOneWidget);
+      expect(find.text('NO POTHOLE DETECTED'), findsOneWidget);
+      expect(find.text('Safe'), findsOneWidget);
+      expect(find.text('GPS OK'), findsOneWidget);
+
+      // When hazard is verified, HUD transitions dynamically to Pothole Detected
+      state.setHazardDetected(true);
+      await tester.pump();
       expect(find.text('Pothole Detected (High)'), findsOneWidget);
       expect(find.text('Alert'), findsOneWidget);
       expect(find.text('POTHOLE DETECTED'), findsOneWidget);
-      expect(find.text('GPS OK'), findsOneWidget);
 
       // Action buttons
       expect(find.text('Report Issue'), findsOneWidget);

@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:road_sense/config/gemini_config.dart';
@@ -213,6 +214,152 @@ void main() {
       expect(find.text('Multimodal AI • Condition: Alright or Not Alright'), findsOneWidget);
       expect(find.text('Google Gemini API Key'), findsOneWidget);
       expect(find.text('Test Gemini API Key'), findsOneWidget);
+    });
+
+    test('7. PotholeVerificationResult parses JSON schema and enforces 0.75 threshold', () {
+      // Case A: High confidence pothole -> isVerifiedHazard is TRUE
+      final verifiedHazard = PotholeVerificationResult.fromJson({
+        'pothole_detected': true,
+        'confidence': 0.88,
+        'reason': 'Visible bowl-shaped depression with broken asphalt chunks.',
+      });
+      expect(verifiedHazard.potholeDetected, isTrue);
+      expect(verifiedHazard.confidence, 0.88);
+      expect(verifiedHazard.confidencePercent, 88);
+      expect(verifiedHazard.isVerifiedHazard, isTrue);
+
+      // Case B: Boundary at exactly 0.75 -> isVerifiedHazard is FALSE (must exceed 0.75)
+      final boundary75 = PotholeVerificationResult.fromJson({
+        'pothole_detected': true,
+        'confidence': 0.75,
+        'reason': 'Possible shallow indentation.',
+      });
+      expect(boundary75.isVerifiedHazard, isFalse);
+
+      // Case C: Exceeds 0.75 -> isVerifiedHazard is TRUE
+      final boundary76 = PotholeVerificationResult.fromJson({
+        'pothole_detected': true,
+        'confidence': 0.76,
+        'reason': 'Confirmed road cavity.',
+      });
+      expect(boundary76.isVerifiedHazard, isTrue);
+
+      // Case D: Pothole false -> isVerifiedHazard is FALSE even with 0.99 confidence
+      final clearPavement = PotholeVerificationResult.fromJson({
+        'pothole_detected': false,
+        'confidence': 0.99,
+        'reason': 'Normal smooth asphalt with painted lane markings.',
+      });
+      expect(clearPavement.potholeDetected, isFalse);
+      expect(clearPavement.confidence, 0.99);
+      expect(clearPavement.isVerifiedHazard, isFalse);
+
+      // Case E: Percentage format (e.g. 95 instead of 0.95) is auto-normalized
+      final normalizedPercent = PotholeVerificationResult.fromJson({
+        'pothole_detected': true,
+        'confidence': 92,
+        'reason': 'Deep cavity on road shoulder.',
+      });
+      expect(normalizedPercent.confidence, closeTo(0.92, 0.001));
+      expect(normalizedPercent.isVerifiedHazard, isTrue);
+    });
+
+    test('8. Fail-safe error handling prevents false-positive alerts', () async {
+      final service = GeminiRoadService.instance;
+
+      // Empty image bytes -> returns safe fallback without throwing
+      final emptyResult = await service.verifyPotholeInImage(Uint8List(0));
+      expect(emptyResult.potholeDetected, isFalse);
+      expect(emptyResult.confidence, 0.0);
+      expect(emptyResult.isVerifiedHazard, isFalse);
+      expect(emptyResult.isErrorFallback, isTrue);
+
+      // Safe fallback evaluation
+      final fallback = PotholeVerificationResult.safeFallback(
+        reason: 'Network connection timeout',
+      );
+      expect(fallback.potholeDetected, isFalse);
+      expect(fallback.confidence, 0.0);
+      expect(fallback.isVerifiedHazard, isFalse);
+      expect(fallback.isErrorFallback, isTrue);
+    });
+
+    testWidgets('9. Camera Screen renders NO POTHOLE DETECTED reticle for safe surface',
+        (WidgetTester tester) async {
+      final state = AppState.instance;
+      state.setRoadEvaluation(
+        RoadConditionEvaluation(
+          isRoadAlright: true,
+          verdict: 'Road surface is clear and in good condition.',
+          defectType: 'None',
+          severity: 'None',
+          conditionScore: 95,
+          depthEstimate: 'N/A',
+          damageArea: 'N/A',
+          recommendedAction: 'Routine monitoring',
+          estimatedCostTaka: 0,
+          summary: 'Intact asphalt surface without hazards.',
+          analyzedAt: DateTime.now(),
+          modelUsed: GeminiConfig.visionModel,
+          latencyMs: 150,
+          verificationResult: PotholeVerificationResult(
+            potholeDetected: false,
+            confidence: 0.96,
+            reason: 'Normal smooth asphalt surface.',
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const CameraScreen(),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('NO POTHOLE DETECTED'), findsOneWidget);
+      expect(find.text('Safe'), findsOneWidget);
+      expect(find.text('Normal smooth asphalt surface.'), findsOneWidget);
+    });
+
+    testWidgets('10. Camera Screen renders Pothole Detected reticle for verified hazard',
+        (WidgetTester tester) async {
+      final state = AppState.instance;
+      state.setRoadEvaluation(
+        RoadConditionEvaluation(
+          isRoadAlright: false,
+          verdict: 'Severe Pothole Cavity detected on roadway.',
+          defectType: 'Pothole',
+          severity: 'Urgent',
+          conditionScore: 35,
+          depthEstimate: '8 cm',
+          damageArea: '1.2 m²',
+          recommendedAction: 'Rapid cold mix asphalt patch',
+          estimatedCostTaka: 2800,
+          summary: 'Dangerous structural depression.',
+          analyzedAt: DateTime.now(),
+          modelUsed: GeminiConfig.visionModel,
+          latencyMs: 180,
+          verificationResult: PotholeVerificationResult(
+            potholeDetected: true,
+            confidence: 0.91,
+            reason: 'Dangerous 8 cm deep cavity.',
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: const CameraScreen(),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text('Pothole Detected (91% Conf)'), findsOneWidget);
+      expect(find.text('POTHOLE DETECTED'), findsOneWidget);
+      expect(find.text('Alert'), findsOneWidget);
     });
   });
 }
